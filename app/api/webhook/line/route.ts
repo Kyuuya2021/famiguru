@@ -1,202 +1,399 @@
 import { NextResponse } from 'next/server';
+
 import { validateSignature, Client } from '@line/bot-sdk';
+
 import { createClient } from '@supabase/supabase-js';
+
 import OpenAI from 'openai';
 
+
+
 // 環境変数のチェック
+
 const channelSecret = process.env.LINE_CHANNEL_SECRET || '';
+
 const channelAccessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
 
-// LINE クライアントの作成
-const lineClient = new Client({
-  channelAccessToken: channelAccessToken,
-});
 
-// OpenAI クライアントの作成
-const openai = new OpenAI({
-  apiKey: openaiApiKey,
-});
+
+// LINE クライアント
+
+const lineClient = new Client({ channelAccessToken });
+
+// OpenAI クライアント
+
+const openai = new OpenAI({ apiKey: openaiApiKey });
+
+// Supabase クライアント
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+
 
 export async function POST(req: Request) {
+
   try {
-    // 1. リクエストボディをテキストとして取得（署名検証に必須）
+
     const body = await req.text();
+
     const signature = req.headers.get('x-line-signature') || '';
 
-    // 2. 署名検証（LINEからのアクセスであることを証明）
+
+
     if (!validateSignature(body, channelSecret, signature)) {
-      console.error('署名検証エラー: 不正なアクセスです');
+
       return NextResponse.json({ message: 'Invalid signature' }, { status: 200 });
+
     }
 
-    // 3. イベントの処理
-    const { events } = JSON.parse(body);
-    
-    // Supabaseクライアント作成
-    const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // イベントごとに処理
+
+    const { events } = JSON.parse(body);
+
+
+
     for (const event of events) {
-      // テキストメッセージ以外は無視
-      if (event.type !== 'message' || event.message.type !== 'text') {
-        continue;
-      }
+
+      if (event.type !== 'message' || event.message.type !== 'text') continue;
+
+
 
       const userId = event.source.userId;
+
+      const groupId = event.source.groupId || event.source.roomId || null; // グループIDまたはルームID
+
       const text = event.message.text;
-      
-      console.log(`受信: ${text} (from ${userId})`);
 
-      // 4. ユーザー(profiles)の確認・作成
-      // まずユーザーがいるか確認
-      let { data: profile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('line_user_id', userId)
-        .single();
 
-      // いなければ作成
-      if (!profile) {
-        console.log('新規ユーザーを作成します');
-        const { data: newProfile, error: profileError } = await supabase
-          .from('profiles')
-          .insert({
-            line_user_id: userId,
-            display_name: 'Guest', // 仮の名前
-            role: 'unknown'
-          })
-          .select('id')
-          .single();
-        
-        if (profileError) {
-          console.error('ユーザー作成エラー:', profileError);
-          continue; 
-        }
-        profile = newProfile;
-      }
 
-      // 5. 会話ログ(conversations)に保存
+      console.log(`受信: ${text}`);
+
+
+
+      // 1. ユーザー(profiles)の取得・作成
+
+      let profileId = await getOrCreateUserProfile(userId);
+
+      if (!profileId) continue;
+
+
+
+      // 2. 家族(families)の取得・作成・メンバー登録
+
+      let familyId = await getOrCreateFamily(profileId, userId, groupId);
+
+
+
+      // 3. 会話ログ(conversations)に保存
+
       const { error: saveError } = await supabase
+
         .from('conversations')
+
         .insert({
-          sender_id: profile?.id,
+
+          sender_id: profileId,
+
+          family_id: familyId, // 家族IDを紐付ける
+
           content: text,
-          family_id: null, // 1対1なのでまだ家族IDは無し
+
           is_ai_generated: false
+
         });
 
-      if (saveError) {
-        console.error('保存エラー:', saveError);
-      } else {
-        console.log('会話を保存しました！');
 
-        // 6. 約30%の確率でAIが会話に参加
+
+      if (!saveError && familyId) {
+
+        // 4. ランダムでAIが返信 (30%)
+
         if (Math.random() < 0.3) {
-          try {
-            await handleAIResponse(profile.id, userId, supabase);
-          } catch (aiError) {
-            // AI参加処理でエラーが発生しても、LINE側には200を返す
-            console.error('AI参加処理エラー:', aiError);
-          }
+
+          await handleAIResponse(familyId, profileId, groupId || userId);
+
         }
+
       }
+
     }
+
+
 
     return NextResponse.json({ message: 'OK' }, { status: 200 });
 
   } catch (error) {
-    console.error('サーバー内部エラー:', error);
-    // LINEにはエラーを返さず200を返す（再送を防ぐため）
+
+    console.error('Error:', error);
+
     return NextResponse.json({ message: 'Error' }, { status: 200 });
+
   }
+
 }
 
-// AIが会話に参加する処理
-async function handleAIResponse(senderId: string, lineUserId: string, supabase: any) {
+
+
+// ユーザープロフィールを取得または作成する関数
+
+async function getOrCreateUserProfile(userId: string) {
+
+  // 既存チェック
+
+  let { data: profile } = await supabase
+
+    .from('profiles')
+
+    .select('id, display_name')
+
+    .eq('line_user_id', userId)
+
+    .single();
+
+
+
+  if (profile) return profile.id;
+
+
+
+  // 新規作成（名前はLINEから取得してみる）
+
+  let displayName = 'Guest';
+
   try {
-    // 家族の直近5件の会話履歴を取得
-    // family_idがnullの場合は、そのユーザーの会話履歴を取得
-    const { data: conversations, error: conversationsError } = await supabase
-      .from('conversations')
-      .select('content, is_ai_generated')
-      .eq('sender_id', senderId)
-      .order('sent_at', { ascending: false })
-      .limit(5);
 
-    if (conversationsError) {
-      console.error('会話履歴取得エラー:', conversationsError);
-      return;
-    }
+    const lineProfile = await lineClient.getProfile(userId);
 
-    if (!conversations || conversations.length === 0) {
-      console.log('会話履歴がありません');
-      return;
-    }
+    displayName = lineProfile.displayName;
 
-    // 会話履歴をテキストに整形（AI生成メッセージは除外して、ユーザーのメッセージのみ）
-    const userMessages = conversations
-      .filter((conv: any) => !conv.is_ai_generated)
-      .map((conv: any) => conv.content)
-      .reverse(); // 時系列順に
+  } catch (e) { console.log('LINEプロフィール取得失敗(ブロック中など)'); }
 
-    if (userMessages.length === 0) {
-      console.log('ユーザーメッセージがありません');
-      return;
-    }
 
-    const conversationHistory = userMessages.join('\n');
 
-    // OpenAI APIでメッセージ生成
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: 'あなたは家族の会話を見守る陽気なマスコットです。直近の会話の流れを読み、30文字以内で楽しく反応してください。質問はせず、感想やリアクションにとどめてください。',
-        },
-        {
-          role: 'user',
-          content: `以下の会話履歴を読んで、短くて明るい相槌やツッコミを1つ生成してください。\n\n${conversationHistory}`,
-        },
-      ],
-      max_tokens: 50,
-      temperature: 0.8,
-    });
+  const { data: newProfile, error } = await supabase
 
-    const aiMessage = completion.choices[0]?.message?.content?.trim();
-    if (!aiMessage) {
-      console.error('AIメッセージ生成失敗');
-      return;
-    }
+    .from('profiles')
 
-    // LINEに送信
-    await lineClient.pushMessage(lineUserId, {
-      type: 'text',
-      text: aiMessage,
-    });
+    .insert({ line_user_id: userId, display_name: displayName, role: 'member' })
 
-    console.log(`AIメッセージを送信しました: ${aiMessage}`);
+    .select('id')
 
-    // AIメッセージをconversationsテーブルに保存
-    const { error: saveError } = await supabase
-      .from('conversations')
-      .insert({
-        sender_id: senderId,
-        content: aiMessage,
-        family_id: null,
-        is_ai_generated: true,
-      });
+    .single();
 
-    if (saveError) {
-      console.error('AIメッセージ保存エラー:', saveError);
+  
+
+  if (error) { console.error('Profile作成エラー:', error); return null; }
+
+  return newProfile.id;
+
+}
+
+
+
+// 家族グループを取得または作成し、メンバーを登録する関数
+
+async function getOrCreateFamily(profileId: string, lineUserId: string, lineGroupId: string | null) {
+
+  let familyId: string | null = null;
+
+
+
+  if (lineGroupId) {
+
+    // A. LINEグループの場合
+
+    const { data: existingFamily } = await supabase
+
+      .from('families')
+
+      .select('id')
+
+      .eq('line_group_id', lineGroupId)
+
+      .single();
+
+    
+
+    if (existingFamily) {
+
+      familyId = existingFamily.id;
+
     } else {
-      console.log('AIメッセージを保存しました');
+
+      // 新規グループ作成
+
+      const { data: newFamily } = await supabase
+
+        .from('families')
+
+        .insert({ line_group_id: lineGroupId, name: '家族グループ' })
+
+        .select('id')
+
+        .single();
+
+      familyId = newFamily?.id || null;
+
     }
-  } catch (error) {
-    console.error('AI参加処理エラー:', error);
-    throw error; // エラーを再スロー（呼び出し元でキャッチされる）
+
+  } else {
+
+    // B. 1対1の場合（個人用家族枠を探す、なければ作る）
+
+    // 自分が所属している、かつ line_group_id が null の家族を探す
+
+    const { data: members } = await supabase
+
+      .from('family_members')
+
+      .select('family_id, families!inner(line_group_id)')
+
+      .eq('user_id', profileId)
+
+      .is('families.line_group_id', null) 
+
+      .limit(1);
+
+
+
+    if (members && members.length > 0) {
+
+      familyId = members[0].family_id;
+
+    } else {
+
+      // 個人用家族枠を作成
+
+      const { data: newFamily } = await supabase
+
+        .from('families')
+
+        .insert({ name: 'マイホーム' }) // グループIDなし
+
+        .select('id')
+
+        .single();
+
+      familyId = newFamily?.id || null;
+
+    }
+
   }
+
+
+
+  // メンバー登録（まだ登録されていなければ）
+
+  if (familyId) {
+
+    const { error: joinError } = await supabase
+
+      .from('family_members')
+
+      .insert({ family_id: familyId, user_id: profileId });
+
+    // 既に登録されている場合はエラーを無視
+
+    if (joinError && !joinError.message.includes('duplicate')) {
+
+      console.error('Family member登録エラー:', joinError);
+
+    }
+
+  }
+
+
+
+  return familyId;
+
+}
+
+
+
+// AI返信ロジック
+
+async function handleAIResponse(familyId: string | null, senderId: string, replyToId: string) {
+
+  // 家族IDが無効な場合は早期リターン
+
+  if (!familyId) {
+
+    console.log('Family ID is null, skipping AI response');
+
+    return;
+
+  }
+
+  // この時点でfamilyIdは確実にstring型
+
+  const validFamilyId: string = familyId;
+
+
+
+  // 会話履歴取得
+
+  const { data: conversations } = await supabase
+
+    .from('conversations')
+
+    .select('content, is_ai_generated')
+
+    .eq('family_id', validFamilyId) // その家族の会話を取得
+
+    .order('sent_at', { ascending: false })
+
+    .limit(5);
+
+
+
+  const history = conversations ? conversations.reverse().map((c: any) => c.content).join('\n') : '';
+
+
+
+  const completion = await openai.chat.completions.create({
+
+    model: 'gpt-4o-mini',
+
+    messages: [
+
+      { role: 'system', content: 'あなたは明るい家族のマスコットです。会話の流れを読んで、30文字以内で楽しく相槌やツッコミを入れてください。' },
+
+      { role: 'user', content: history }
+
+    ],
+
+    max_tokens: 60,
+
+  });
+
+
+
+  const aiText = completion.choices[0]?.message?.content?.trim();
+
+  if (!aiText) return;
+
+
+
+  await lineClient.pushMessage(replyToId, { type: 'text', text: aiText });
+
+
+
+  await supabase.from('conversations').insert({
+
+    sender_id: senderId,
+
+    family_id: validFamilyId,
+
+    content: aiText,
+
+    is_ai_generated: true
+
+  });
+
 }
