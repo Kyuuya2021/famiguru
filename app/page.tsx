@@ -258,7 +258,13 @@ export default function Home() {
 
   const playGacha = async () => {
 
-    if (!profile) return;
+    if (!profile) {
+
+      alert('プロフィールが読み込まれていません。しばらく待ってから再度お試しください。');
+
+      return;
+
+    }
 
     setIsGachaOpen(true);
 
@@ -350,7 +356,16 @@ export default function Home() {
 
 
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-orange-50 text-orange-400">Loading...</div>;
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-orange-50 text-orange-400">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-orange-400 border-t-transparent mb-4"></div>
+          <p className="text-orange-700 text-lg">読み込み中...</p>
+        </div>
+      </div>
+    );
+  }
 
 
 
@@ -434,9 +449,13 @@ export default function Home() {
 
         onClick={playGacha}
 
-        disabled={isGachaAnimating}
+        disabled={isGachaAnimating || loading || !profile}
 
-        className="fixed bottom-6 right-6 w-16 h-16 bg-gradient-to-br from-pink-500 to-orange-500 rounded-full shadow-lg flex items-center justify-center text-3xl hover:scale-110 transition-transform active:scale-95 z-20 border-4 border-white disabled:opacity-50 disabled:cursor-not-allowed"
+        className="fixed bottom-6 right-6 w-16 h-16 bg-gradient-to-br from-pink-500 to-orange-500 rounded-full shadow-lg flex items-center justify-center text-3xl hover:scale-110 transition-transform active:scale-95 z-50 border-4 border-white disabled:opacity-50 disabled:cursor-not-allowed"
+
+        aria-label="話題ガチャを引く"
+
+        title={!profile ? "プロフィールを読み込み中..." : "話題ガチャを引く"}
 
       >
 
