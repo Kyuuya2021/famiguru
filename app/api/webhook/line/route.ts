@@ -270,7 +270,7 @@ async function getOrCreateFamily(profileId: string, lineUserId: string, lineGrou
 
       // 個人用家族枠を作成
 
-      const { data: newFamily } = await supabase
+      const { data: newFamily, error: createError } = await supabase
 
         .from('families')
 
@@ -279,6 +279,16 @@ async function getOrCreateFamily(profileId: string, lineUserId: string, lineGrou
         .select('id')
 
         .single();
+
+      
+
+      if (createError) {
+
+        console.error('★家族作成失敗:', createError);
+
+      }
+
+      
 
       familyId = newFamily?.id || null;
 
