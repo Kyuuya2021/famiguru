@@ -72,7 +72,11 @@ export async function POST(req: Request) {
 
 
 
+      // ★ここを書き換え: どんなデータが届いているか詳細にログに出す
+
       console.log(`受信: ${text}`);
+
+      console.log('Event Source:', JSON.stringify(event.source)); 
 
 
 
